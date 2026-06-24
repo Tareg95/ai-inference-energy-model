@@ -37,7 +37,7 @@ Carbon Emissions (country-level grid intensity)
 |-------|-------------|
 | **Block 0** | System constants, power parameters, and provisioning strategy initialization |
 | **Block 1** | Workload generation — NHPP diurnal curve and Pareto burst overlay |
-| **Block 2** | Capacity, utilization, and 15-min cold-start lag model |
+| **Block 2** | Capacity, utilization, and 3 min cold-start lag model |
 | **Block 3** | GPU state distribution (active / execution-idle / deep-idle) |
 | **Block 4** | Detailed energy analysis with stacked breakdown |
 | **Block 5** | Country-level carbon emissions using live grid intensity data |

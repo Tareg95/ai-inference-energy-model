@@ -1,150 +1,322 @@
-# GPU Cluster Energy & Carbon Simulation
+# GPU Cluster Energy Simulation for AI Inference
 
-> Simulation model for AI inference workloads — modeling GPU power states, provisioning strategies, and carbon emissions.  
+> Simulation model for AI inference workloads — modeling request arrivals, GPU power states, provisioning strategies, energy use, and SLA risk.
 > KTH Bachelor's Thesis · Electronics and Computer Engineering
 
 ---
 
 ## Overview
 
-This project simulates the energy consumption and CO₂ emissions of a GPU cluster serving AI inference workloads over a 24-hour period. It models realistic request arrival patterns, GPU power states, and provisioning strategies to evaluate how operational decisions affect both service quality and environmental impact.
+This project simulates the energy consumption of a GPU cluster serving AI inference workloads over a 24-hour period.
 
-The simulation is structured as a sequence of modular blocks, each building on the previous, making it easy to experiment with different configurations.
+The model compares how different provisioning strategies affect:
+
+* total daily energy consumption,
+* useful active work,
+* idle and overhead energy,
+* GPU utilization,
+* SLA violation risk during demand spikes.
+
+The simulation is built around a reusable Python implementation in `src/` and an analysis notebook in `notebooks/`.
 
 ---
 
 ## Model Architecture
 
+```text
+Workload Generation
+(NHPP, NHPP + Pareto bursts, or Gamma renewal process)
+        ↓
+Provisioning Strategy
+(Static / Conservative / Moderate / Tight / Aggressive)
+        ↓
+Cold-Start Lag and Capacity Model
+        ↓
+Utilization Analysis
+        ↓
+GPU State Distribution
+(Active / Execution-idle / Deep-idle)
+        ↓
+Energy Accounting
+(kWh per simulation step and daily totals)
+        ↓
+Strategy Comparison and Headroom Sweep
 ```
-Workload (NHPP + Pareto bursts)
-        ↓
-Provisioning Strategy (Static / Conservative / Aggressive)
-        ↓
-Cold-Start Lag & Capacity Model
-        ↓
-GPU State Distribution (Active / Execution-Idle / Deep-Idle)
-        ↓
-Energy Analysis (kWh per 15-min interval)
-        ↓
-Carbon Emissions (country-level grid intensity)
+
+---
+
+## Repository Structure
+
+```text
+ai-inference-energy-model/
+│
+├── src/
+│   ├── config.py          # Shared parameters and configuration
+│   └── Simulation.py      # Core reusable simulation functions
+│
+├── notebooks/
+│   └── ai_inference_energy_model.ipynb
+│
+├── figures/              # Generated figures
+├── requirements.txt
+└── README.md
 ```
 
 ---
 
 ## Simulation Blocks
 
-| Block | Description |
-|-------|-------------|
-| **Block 0** | System constants, power parameters, and provisioning strategy initialization |
-| **Block 1** | Workload generation — NHPP diurnal curve and Pareto burst overlay |
-| **Block 2** | Capacity, utilization, and 3 min cold-start lag model |
-| **Block 3** | GPU state distribution (active / execution-idle / deep-idle) |
-| **Block 4** | Detailed energy analysis with stacked breakdown |
-| **Block 5** | Country-level carbon emissions using live grid intensity data |
-| **Block 6** | Full strategy × arrival-process comparison table |
+The notebook is organized into sequential blocks:
+
+| Block       | Description                                                         |
+| ----------- | ------------------------------------------------------------------- |
+| **Block 0** | Imports, reproducibility seed, system constants, and configuration  |
+| **Block 1** | Workload generation using diurnal demand and burst/renewal arrivals |
+| **Block 2** | Capacity, utilization, and cold-start lag model                     |
+| **Block 3** | GPU state distribution: active, execution-idle, and deep-idle       |
+| **Block 4** | Energy accounting and daily energy breakdown                        |
+| **Block 5** | Strategy × arrival-process comparison table                         |
+| **Block 6** | Headroom sweep showing energy savings versus SLA violations         |
 
 ---
 
 ## Key Parameters
 
 ### Cluster
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `total_gpus` | 256 | Physical cluster size |
-| `mu` | 0.2 req/s | Service rate per GPU |
-| `PUE` | 1.08 | Power Usage Effectiveness |
 
-### Power States (W)
-| State | Power |
-|-------|-------|
-| `P_idle` (deep idle) | 140 W |
-| `P_execution_idle` | 220 W |
-| `P_active_avg` | 450 W |
-| `P_maxTDP` | 1000 W |
+| Parameter      | Value     | Description                              |
+| -------------- | --------- | ---------------------------------------- |
+| `total_gpus`   | 256       | Physical GPU cluster size                |
+| `mu`           | 0.2 req/s | Service rate per GPU                     |
+| `pod_size`     | 8 GPUs    | Scaling granularity                      |
+| `c_peak`       | 200 GPUs  | Peak reference capacity                  |
+| `step_minutes` | 3 min     | Simulation time resolution               |
+| `num_steps`    | 480       | Number of simulation steps over 24 hours |
 
-### Configurable Options
+The peak request rate is derived from the conservative target utilization:
+
 ```python
-arrival_mode  = 'hybrid'        # 'nhpp_only' | 'hybrid'
-strategy_mode = 'Conservative'  # 'Static' | 'Conservative' | 'Aggressive'
+lambda_peak = target_rho_conservative * mu * c_peak
+```
+
+With the default values:
+
+```python
+lambda_peak = 0.78 * 0.2 * 200 = 31.2 req/s
 ```
 
 ---
 
-## Arrival Process
+## Power Model
 
-Two arrival modes are supported:
+The simulation uses three GPU power states.
 
-- **NHPP only** — a smooth Non-Homogeneous Poisson Process shaped by a 24-hour diurnal demand curve (peak ~40 req/s at hour 13).
-- **Hybrid** — NHPP base overlaid with Pareto-distributed burst events (shape=1.2, 2 bursts/hour), modeling real-world traffic spikes.
+| State              | Power |
+| ------------------ | ----- |
+| Deep-idle GPU      | 140 W |
+| Execution-idle GPU | 220 W |
+| Active GPU average | 450 W |
+
+The model also includes an execution-idle fraction:
+
+```python
+execution_idle_fraction = 0.197
+```
+
+This represents the part of provisioned GPU time that remains in an execution-idle state even during active serving periods.
+
+---
+
+## Arrival Processes
+
+The model supports three arrival-process variants in the simulation code:
+
+### 1. NHPP only
+
+A smooth Non-Homogeneous Poisson Process shaped by a 24-hour diurnal demand curve.
+
+### 2. Hybrid
+
+An NHPP base workload combined with Pareto-distributed burst events.
+
+Default burst parameters include:
+
+```python
+pareto_shape = 2.0
+burst_rate_per_hour = 10.0
+burst_window_hours = 0.01
+size_multiplier_x_lambda_peak = 0.5
+```
+
+This mode is used as a stress-test workload with bursty request spikes.
+
+### 3. Gamma renewal
+
+A non-homogeneous Gamma renewal process used to model more variable inter-arrival behavior than a standard Poisson process.
+
+The default Gamma renewal shape is:
+
+```python
+gamma_renewal_shape = 0.5
+```
+
+This gives a coefficient of variation above 1, producing more burst-like arrival spacing than a standard NHPP.
 
 ---
 
 ## Provisioning Strategies
 
-Three strategies determine how many GPUs are provisioned each 15-minute interval:
+The simulation compares five provisioning strategies:
 
-- **Static** — all 256 GPUs always active.
-- **Conservative** — target utilization ≤ 78%; pods scale in multiples of 8.
-- **Aggressive** — target utilization ≤ 95%; tighter provisioning, higher SLA risk.
+| Strategy     | Target utilization | Description                                     |
+| ------------ | ------------------ | ----------------------------------------------- |
+| Static       | N/A                | Keeps all 256 GPUs provisioned                  |
+| Conservative | 0.78               | Leaves larger headroom to reduce SLA risk       |
+| Moderate     | 0.85               | Balances energy savings and risk                |
+| Tight        | 0.90               | Reduces idle capacity further                   |
+| Aggressive   | 0.95               | Maximizes energy savings but increases SLA risk |
 
-A one-step (15-min) cold-start lag is applied on scale-up events; scale-down is treated as instantaneous.
+Provisioned capacity is rounded up to the nearest pod size of 8 GPUs.
 
----
-
-## GPU Power State Model
-
-Each GPU is classified into one of three states at every time step:
-
-- **Active inference** — GPU is serving requests.
-- **Execution-idle** — model is loaded in HBM, GPU is provisioned but idle (draws ~220 W). Includes a 19.7% execution-idle overhead fraction for active GPUs.
-- **Deep-idle** — GPU is off the provisioned pool, HBM flushed (draws ~140 W).
+A one-step cold-start lag is applied when scaling up. With the default 3-minute resolution, this corresponds to a 3-minute scale-up delay. Scale-down is treated as immediate.
 
 ---
 
-## Energy & Carbon Output
+## GPU State Model
 
-Block 4 breaks down daily energy into four components:
+At every simulation step, GPUs are divided into three categories:
 
+### Active inference
+
+GPUs actively serving inference requests.
+
+### Execution-idle
+
+Provisioned GPUs that are not doing useful inference work but still keep the model loaded and consume execution-idle power.
+
+### Deep-idle
+
+Unprovisioned GPUs outside the active serving pool.
+
+The energy model separates daily energy into:
+
+```text
+Total energy =
+    Pure active work
+  + Active task overhead
+  + Inactive idle energy
+  + Deep-idle energy
 ```
-Total energy = Pure active work
-             + Active task overhead (execution-idle fraction)
-             + Inactive idle (provisioned but unused)
-             + Deep idle (unprovisioned GPUs)
+
+---
+
+## Output Metrics
+
+The main outputs are:
+
+| Metric         | Meaning                                                            |
+| -------------- | ------------------------------------------------------------------ |
+| `total_kwh`    | Total daily energy consumption                                     |
+| `work_kwh`     | Useful active inference energy                                     |
+| `overhead_kwh` | Active execution-idle overhead                                     |
+| `idle_kwh`     | Energy from provisioned but inactive GPUs                          |
+| `deep_kwh`     | Energy from deep-idle GPUs                                         |
+| `mean_rho`     | Mean effective utilization                                         |
+| `max_rho`      | Maximum effective utilization                                      |
+| `sla_viol`     | Number of 3-minute intervals where effective utilization exceeds 1 |
+
+SLA violations are counted as simulation steps where:
+
+```python
+rho_effective > 1.0
 ```
 
-Block 5 fetches live carbon intensity data from [Our World in Data](https://ourworldindata.org/grapher/carbon-intensity-electricity) and computes daily kg CO₂ for the 5 cleanest and 5 most carbon-intensive electricity grids.
+With the default 3-minute resolution, one day contains 480 possible violation intervals.
 
 ---
 
 ## Requirements
 
+Install the required Python packages with:
+
 ```bash
-pip install numpy matplotlib pandas requests
+pip install -r requirements.txt
 ```
 
-Python 3.8+ recommended. The notebook is designed to run sequentially (e.g. in Google Colab or Jupyter).
+The current requirements are:
+
+```text
+numpy
+matplotlib
+pandas
+jupyter
+ipywidgets
+```
+
+Python 3.8+ is recommended.
 
 ---
 
 ## Usage
 
-1. Open the notebook (or run the script blocks in order).
-2. Set `arrival_mode` and `strategy_mode` in Block 0.
-3. Run all blocks top to bottom.
-4. Block 6 will print a full comparison table across all 6 strategy/arrival combinations.
+1. Clone the repository.
+2. Install the requirements.
+3. Open the notebook:
 
-To reproduce the thesis results (Table 4.2), run Block 6 without modifying any parameters.
+```text
+notebooks/ai_inference_energy_model.ipynb
+```
+
+4. Run the notebook from top to bottom.
+
+The notebook imports shared configuration from `src/config.py` and simulation functions from `src/Simulation.py`.
+
+To change the experiment, edit the configuration values in `src/config.py`, such as:
+
+```python
+total_gpus
+mu
+pod_size
+step_minutes
+target_rho_conservative
+target_rho_moderate
+target_rho_tight
+target_rho_aggressive
+```
+
+---
+
+## Reproducing the Thesis Results
+
+To reproduce the main comparison table, run the notebook without changing the default parameters.
+
+The main strategy comparison is produced in Block 5. It compares the provisioning strategies across the selected arrival-process models and reports mean and standard deviation over multiple random seeds.
+
+Block 6 performs a headroom sweep to show the trade-off between reduced energy use and increased SLA risk.
 
 ---
 
 ## Project Context
 
-This simulation was developed as part of a Bachelor's thesis at KTH Royal Institute of Technology. The research question investigates how AI inference workload characteristics and provisioning decisions affect energy consumption and carbon emissions in GPU clusters.
+This simulation was developed as part of a Bachelor's thesis at KTH Royal Institute of Technology.
+
+The thesis investigates how workload characteristics and provisioning decisions affect the energy consumption of GPU clusters used for AI inference.
 
 The model draws on:
-- Queueing theory (M/M/c-style utilization)
-- GPU power modeling (active, execution-idle, deep-idle states)
-- Real-world carbon intensity data
+
+* queueing-inspired utilization analysis,
+* GPU power-state modeling,
+* bursty AI inference workload behavior,
+* autoscaling and provisioning trade-offs,
+* energy versus service-quality analysis.
+
+---
+
+## Important Note
+
+This repository currently focuses on GPU-side IT energy modeling.
+
+It does not currently implement full datacenter carbon accounting, live grid-intensity fetching, or full facility-level energy modeling with PUE. Those can be added later as extensions, but they are not part of the current core implementation.
 
 ---
 
